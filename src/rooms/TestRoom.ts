@@ -1,5 +1,12 @@
 import { Room, Client } from "colyseus";
-import { Clothing, InputData, Message, MyRoomState, Player } from "./RoomState";
+import {
+  Clothing,
+  InputData,
+  Message,
+  MyRoomState,
+  Player,
+  Trade,
+} from "./RoomState";
 import { IncomingMessage } from "http";
 import { Bumpkin } from "../types/bumpkin";
 
@@ -18,8 +25,22 @@ export class TestRoom extends Room<MyRoomState> {
     }
   };
 
+  private pushTrade = (trade: Trade) => {
+    this.state.trades.push(trade);
+
+    while (this.state.trades.length > MAX_MESSAGES) {
+      this.state.trades.shift();
+    }
+  };
+
+  // Farm ID > sessionId
+  private farmConnections: Record<number, string> = {};
+
   onCreate(options: any) {
     this.setState(new MyRoomState());
+
+    // set map dimensions
+    (this.state.mapWidth = 600), (this.state.mapHeight = 600);
 
     this.onMessage(0, (client, input) => {
       // handle player input
@@ -51,11 +72,15 @@ export class TestRoom extends Room<MyRoomState> {
     this.state.players.forEach((player, key) => {
       let input: InputData | undefined;
 
-      // dequeue player inputs
+      // dequeue player inputs.
       while ((input = player.inputQueue.shift())) {
         if (input.x || input.y) {
           player.x = input.x;
           player.y = input.y;
+        }
+
+        if (input.sceneId) {
+          player.sceneId = input.sceneId;
         }
 
         if (input.clothing) {
@@ -77,10 +102,23 @@ export class TestRoom extends Room<MyRoomState> {
 
         if (input.text) {
           const message = new Message();
+          message.sceneId = player.sceneId;
           message.text = input.text;
           message.sessionId = key;
+          message.farmId = player.farmId;
           message.sentAt = Date.now();
           this.pushMessage(message);
+        }
+
+        if (input.trade) {
+          const trade = new Trade();
+          trade.sceneId = player.sceneId;
+          trade.tradeId = input.trade.tradeId;
+          trade.text = "Trade bought";
+          trade.buyerId = input.trade.buyerId;
+          trade.sellerId = input.trade.sellerId;
+          trade.boughtAt = Date.now();
+          this.pushTrade(trade);
         }
       }
     });
@@ -88,22 +126,76 @@ export class TestRoom extends Room<MyRoomState> {
 
   async onAuth(
     client: Client<any>,
-    options: { jwt: string; farmId: number; bumpkin: Bumpkin },
+    options: {
+      jwt: string;
+      farmId: number;
+      bumpkin: Bumpkin;
+      sceneId: string;
+      experience: number;
+    },
     request?: IncomingMessage | undefined
   ) {
-    // TODO - implement your own Auth here to verify who they are
-    return { bumpkin: options.bumpkin, farmId: options.farmId };
+    return {
+      bumpkin: options.bumpkin,
+      farmId: options.farmId,
+      sceneId: options.sceneId,
+      experience: options.experience,
+    };
+
+    // console.log("Try auth plaza", { options });
+    // if (!options.jwt || !options.farmId) return false;
+
+    // const jwt = await verifyRawJwt(options.jwt);
+
+    // if (!jwt.userAccess.verified) return false;
+
+    // const farm = await loadFarm(options.farmId);
+
+    // if (!farm || farm.updatedBy !== jwt.address) {
+    //   throw new Error("Not your farm");
+    // }
+
+    // return {
+    //   bumpkin: farm.gameState.bumpkin,
+    //   farmId: options.farmId,
+    // };
   }
 
   onJoin(
     client: Client,
     options: { x: number; y: number },
-    auth: { bumpkin: Bumpkin; farmId: number }
+    auth: {
+      bumpkin: Bumpkin;
+      farmId: number;
+      sceneId: string;
+      experience: number;
+    }
   ) {
+    //
+    const previousConnection = this.farmConnections[auth.farmId];
+    if (previousConnection) {
+      // this.state.players.delete(previousConnection);
+      const client = this.clients.find(
+        (client) => client.sessionId === previousConnection
+      );
+
+      if (
+        client &&
+        this.state.players.get(client.sessionId)?.sceneId === "corn_maze"
+      ) {
+        throw new Error("You are already connected");
+      }
+
+      client?.leave();
+    }
+
+    this.farmConnections[auth.farmId] = client.sessionId;
+
     const player = new Player();
-    player.x = options.x;
-    player.y = options.y;
+    player.x = options.x ?? 560; // Math.random() * this.state.mapWidth;
+    player.y = options.y ?? 300; //Math.random() * this.state.mapHeight;
     player.farmId = auth.farmId;
+    player.experience = auth.experience ?? 0;
 
     const clothing = auth.bumpkin.equipped;
     player.clothing.body = clothing.body;
@@ -116,12 +208,9 @@ export class TestRoom extends Room<MyRoomState> {
     player.clothing.hair = clothing.hair;
     player.clothing.wings = clothing.wings;
 
-    this.state.players.set(client.sessionId, player);
+    player.sceneId = auth.sceneId;
 
-    const message = new Message();
-    message.text = `Player ${client.sessionId} has just joined`;
-    message.sentAt = Date.now();
-    this.pushMessage(message);
+    this.state.players.set(client.sessionId, player);
   }
 
   onLeave(client: Client, consented: boolean) {
