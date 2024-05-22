@@ -1,10 +1,14 @@
 import { Room, Client } from "colyseus";
 import {
+  Action,
+  Bud,
   Clothing,
+  FactionName,
   InputData,
   Message,
   MyRoomState,
   Player,
+  Reaction,
   Trade,
 } from "./RoomState";
 import { IncomingMessage } from "http";
@@ -15,6 +19,8 @@ const MAX_MESSAGES = 100;
 export class TestRoom extends Room<MyRoomState> {
   fixedTimeStep = 1000 / 60;
 
+  // Safe limit of clients to avoid performance issues
+  // Depending on your Portal and server specs, you can increase this number
   maxClients: number = 150;
 
   private pushMessage = (message: Message) => {
@@ -22,6 +28,14 @@ export class TestRoom extends Room<MyRoomState> {
 
     while (this.state.messages.length > MAX_MESSAGES) {
       this.state.messages.shift();
+    }
+  };
+
+  private pushReaction = (reaction: Reaction) => {
+    this.state.reactions.push(reaction);
+
+    while (this.state.reactions.length > MAX_MESSAGES) {
+      this.state.reactions.shift();
     }
   };
 
@@ -33,9 +47,18 @@ export class TestRoom extends Room<MyRoomState> {
     }
   };
 
+  private pushAction = (action: Action) => {
+    this.state.actions.push(action);
+
+    while (this.state.actions.length > 10) {
+      this.state.actions.shift();
+    }
+  };
+
   // Farm ID > sessionId
   private farmConnections: Record<number, string> = {};
 
+  // This method is called when the room is created
   onCreate(options: any) {
     this.setState(new MyRoomState());
 
@@ -59,13 +82,9 @@ export class TestRoom extends Room<MyRoomState> {
         this.fixedTick(this.fixedTimeStep);
       }
     });
-
-    const message = new Message();
-    message.text = `Welcome to ${this.roomName.replace("_", " ")}.`;
-    message.sentAt = Date.now();
-    this.pushMessage(message);
   }
 
+  // This method is called every fixed time step (1000 / 60)
   fixedTick(timeStep: number) {
     const velocity = 1.68;
 
@@ -77,6 +96,19 @@ export class TestRoom extends Room<MyRoomState> {
         if (input.x || input.y) {
           player.x = input.x;
           player.y = input.y;
+
+          // Check if they have moved away from their placeables
+          const bud = this.state.buds.get(key);
+          if (!!bud) {
+            const distance = Math.sqrt(
+              Math.pow(player.x - (bud.x ?? 0), 2) +
+                Math.pow(player.y - (bud.y ?? 0), 2)
+            );
+
+            if (distance > 50) {
+              this.state.buds.delete(key);
+            }
+          }
         }
 
         if (input.sceneId) {
@@ -94,6 +126,10 @@ export class TestRoom extends Room<MyRoomState> {
             dress: input.clothing.dress,
             hat: input.clothing.hat,
             hair: input.clothing.hair,
+            beard: input.clothing.beard,
+            shoes: input.clothing.shoes,
+            tool: input.clothing.tool,
+            background: input.clothing.background,
             updatedAt: Date.now(),
           });
         }
@@ -106,8 +142,32 @@ export class TestRoom extends Room<MyRoomState> {
           message.text = input.text;
           message.sessionId = key;
           message.farmId = player.farmId;
+          message.username = player.username;
           message.sentAt = Date.now();
           this.pushMessage(message);
+        }
+
+        if (input.reaction) {
+          const reaction = new Reaction();
+          reaction.sceneId = player.sceneId;
+          reaction.reaction = input.reaction;
+          reaction.sessionId = key;
+          reaction.farmId = player.farmId;
+          reaction.sentAt = Date.now();
+          this.pushReaction(reaction);
+        }
+
+        if (input.budId) {
+          const bud = new Bud();
+          bud.sceneId = player.sceneId;
+          bud.x = player.x;
+          bud.id = Number(input.budId);
+          bud.y = player.y;
+          bud.farmId = player.farmId;
+          this.state.buds.set(key, bud);
+
+          // Max time for a bud to show is 5 minutes
+          setTimeout(() => this.state.buds.delete(key), 5 * 60 * 1000);
         }
 
         if (input.trade) {
@@ -120,10 +180,30 @@ export class TestRoom extends Room<MyRoomState> {
           trade.boughtAt = Date.now();
           this.pushTrade(trade);
         }
+
+        if (input.action) {
+          const action = new Action();
+          action.sceneId = player.sceneId;
+          action.farmId = player.farmId;
+          action.event = input.action;
+          action.sentAt = Date.now();
+          action.x = input.x;
+          action.y = input.y;
+          this.pushAction(action);
+        }
+
+        if (input.username) {
+          player.username = input.username;
+        }
+
+        if (input.faction) {
+          player.faction = input.faction;
+        }
       }
     });
   }
 
+  // This method is called when a client tries to join the room
   async onAuth(
     client: Client<any>,
     options: {
@@ -141,40 +221,25 @@ export class TestRoom extends Room<MyRoomState> {
       sceneId: options.sceneId,
       experience: options.experience,
     };
-
-    // console.log("Try auth plaza", { options });
-    // if (!options.jwt || !options.farmId) return false;
-
-    // const jwt = await verifyRawJwt(options.jwt);
-
-    // if (!jwt.userAccess.verified) return false;
-
-    // const farm = await loadFarm(options.farmId);
-
-    // if (!farm || farm.updatedBy !== jwt.address) {
-    //   throw new Error("Not your farm");
-    // }
-
-    // return {
-    //   bumpkin: farm.gameState.bumpkin,
-    //   farmId: options.farmId,
-    // };
   }
 
+  // This method is called when a client joins the room
   onJoin(
     client: Client,
     options: { x: number; y: number },
     auth: {
       bumpkin: Bumpkin;
       farmId: number;
+      faction?: FactionName;
       sceneId: string;
       experience: number;
+      username?: string;
+      fingerprint: string;
     }
   ) {
     //
     const previousConnection = this.farmConnections[auth.farmId];
     if (previousConnection) {
-      // this.state.players.delete(previousConnection);
       const client = this.clients.find(
         (client) => client.sessionId === previousConnection
       );
@@ -207,16 +272,25 @@ export class TestRoom extends Room<MyRoomState> {
     player.clothing.hat = clothing.hat;
     player.clothing.hair = clothing.hair;
     player.clothing.wings = clothing.wings;
+    player.clothing.beard = clothing.beard;
+    player.clothing.shoes = clothing.shoes;
+    player.clothing.background = clothing.background;
+    player.clothing.tool = clothing.tool;
 
     player.sceneId = auth.sceneId;
+    player.username = auth.username;
+    player.faction = auth.faction;
 
     this.state.players.set(client.sessionId, player);
   }
 
+  // This method is called when a client leaves the room
   onLeave(client: Client, consented: boolean) {
     this.state.players.delete(client.sessionId);
+    this.state.buds.delete(client.sessionId);
   }
 
+  // This method is called when the room is disposed
   onDispose() {
     console.log("room", this.roomId, "disposing...");
   }
