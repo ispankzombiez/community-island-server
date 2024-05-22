@@ -1,5 +1,5 @@
 import { Schema, type, MapSchema, ArraySchema } from "@colyseus/schema";
-import { Bumpkin } from "../types/bumpkin";
+import { Equipped } from "../types/bumpkin";
 
 export type FactionName =
   | "sunflorians"
@@ -12,7 +12,7 @@ export interface InputData {
   y: number;
   tick: number;
   text: string;
-  clothing: Bumpkin;
+  clothing: Equipped;
   sceneId: string;
   trade?: {
     buyerId: string;
