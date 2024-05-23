@@ -17,7 +17,7 @@ export default Arena({
     /**
      * Define your room handlers:
      */
-    gameServer.define("community_island", TestRoom);
+    gameServer.define("my-custom-portal", TestRoom);
 
     //
     // keep gameServer reference, so we can
